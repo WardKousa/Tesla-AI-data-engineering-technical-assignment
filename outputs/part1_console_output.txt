@@ -1,0 +1,48 @@
+======================================================================
+PART 1 - BESS PERFORMANCE AND REVENUE ANALYSIS
+Data: data\merged_bess_market_data.csv  (17,376 rows, 2024-01-01 00:00:00 -> 2024-06-29 23:45:00)
+
+-- Step 1a: Total energy throughput ---------------------------------
+Total discharged:     46,225.1 MWh
+Total charged:        46,086.0 MWh
+Discharged/charged ratio: 1.003
+  NOTE: ratio > 1 is physically implausible for a real battery (round-trip losses mean energy out < energy in); flags this as synthetic/simulated data.
+
+-- Step 1b: Average daily revenue per mode (GBP/day) ----------------
+Net = discharge income minus charging cost (primary metric).
+Gross = discharge income only.
+                      avg_daily_net_gbp  avg_daily_gross_gbp
+Operational Mode                                            
+Energy Arbitrage                5916.67             11098.36
+Frequency Regulation             -80.56              1036.57
+Peak Shaving                    5699.03              9159.40
+
+-- Step 1c: Lowest-revenue 14-day window in Q1 2024 -----------------
+Recommended outage: 2024-03-11 -> 2024-03-24
+Net revenue at stake:    GBP       23,881
+Average 14-day window:  GBP      150,135
+Worst-case (max) window:GBP      247,275
+Saving vs average window: GBP 126,254
+
+-- Step 2: SQL insights (SQLite, queries.sql) -----------------------
+
+  [month, total_revenue_gbp]
+    ('2024-01', 495202.82)
+    ('2024-02', 330022.64)
+    ('2024-03', 181891.57)
+    ('2024-04', 281420.06)
+    ('2024-05', 363119.91)
+    ('2024-06', 436201.1)
+
+  [date, daily_revenue_gbp]
+    ('2024-01-01', 26418.27)
+
+  [date, daily_revenue_gbp]
+    ('2024-03-24', 1391.34)
+
+  [avg_price_peak_shaving_gbp_mwh]
+    (58.69,)
+
+Chart saved to outputs\part1_outage_window.png
+SQLite DB saved to outputs\bess.db
+Cross-check passed: pandas total revenue == SQLite total revenue.
