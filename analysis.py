@@ -259,7 +259,20 @@ def main() -> None:
     print(f"\nChart saved to {CHART_PATH}")
     print(f"SQLite DB saved to {DB_PATH}")
 
-    # Cross-check: pandas total must equal the sum of SQL monthly totals.
+    # Cross-check 1: brute-force scan every candidate window and confirm it
+    # agrees with the rolling-sum result in find_worst_window().
+    daily = window["daily_revenue"]
+    n_windows = len(daily) - OUTAGE_DAYS + 1
+    bf_revenue, bf_start = min(
+        (daily.iloc[i:i + OUTAGE_DAYS].sum(), daily.index[i])
+        for i in range(n_windows)
+    )
+    assert abs(bf_revenue - window["window_revenue_gbp"]) < 1e-6, "window revenue mismatch"
+    assert bf_start == window["start"], "window start mismatch"
+    print(f"Cross-check passed: brute-force scan of {n_windows} windows "
+          "confirms the recommended outage window.")
+
+    # Cross-check 2: pandas total revenue must equal the SQLite total.
     with sqlite3.connect(DB_PATH) as conn:
         sql_total = conn.execute("SELECT SUM(revenue_gbp) FROM bess_readings").fetchone()[0]
     assert abs(sql_total - df["revenue_gbp"].sum()) < 1e-6, "pandas/SQL revenue mismatch"

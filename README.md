@@ -1,81 +1,68 @@
 # Tesla AI/Data Engineer Intern — Technical Assignment
 
-Solution for the Energy (EMEA, Amsterdam) technical assignment: BESS revenue analysis
-(Part 1) and fleet log intelligence with an agentic harness (Part 2).
+BESS revenue analysis (Part 1) and, to follow, fleet log intelligence with an
+agentic harness (Part 2).
 
-## Setup
+## How to run
 
 ```bash
-python -m venv .venv          # optional
 pip install -r requirements.txt
+python analysis.py
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. The script prints the full analysis to the console and writes
+two things to `outputs/`:
 
-## Part 1 — BESS performance & revenue analysis
+- `part1_outage_window.png` — the chart used in the report
+- `bess.db` — a SQLite database you can run `queries.sql` against directly
+  (`sqlite3 outputs/bess.db < queries.sql`)
 
-```bash
-python analysis.py            # uses data/merged_bess_market_data.csv
-```
+The headline result and chart are in [report.md](report.md).
 
-Prints the full analysis to the console and writes:
+## Approach
 
-- `outputs/part1_outage_window.png` — daily net revenue with the recommended
-  14-day outage window shaded
-- `outputs/bess.db` — SQLite database (`bess_readings`) against which
-  `queries.sql` can be re-run directly (`sqlite3 outputs/bess.db < queries.sql`
-  works too, since the file currently contains only Part 1 statements)
+The data is 15-minute readings, so I turn each row's power into energy with
+`energy = Power × 0.25h`, then into money with `× Market Price`. That gives a signed
+**net** revenue per row: discharging earns, charging costs. I use net throughout
+because it's what actually matters for the outage question — a site that's offline
+loses its discharge income but also avoids paying to charge. (Gross discharge-only
+value is reported alongside so the choice is transparent.) Under net, Frequency
+Regulation comes out slightly negative, which is expected: the dataset only has energy
+prices, and in real life FR is paid mostly through availability fees that aren't here.
 
-Findings and the outage recommendation are in [report.md](report.md).
+For the outage window I build a daily net-revenue series, take a rolling 14-day sum
+sliding one day at a time, keep every window fully inside 1 Jan–31 Mar, and pick the
+cheapest. The result is double-checked two ways: a brute-force scan over all 78
+candidate windows, and an assertion that the pandas and SQL revenue totals match.
 
-### Approach & key decisions
+The three SQL insights (monthly revenue, best/worst day, average Peak Shaving price)
+live in `queries.sql` and run against SQLite — standard library, no extra
+dependencies, and the file stays plain and runnable on its own.
 
-- **Energy**: rows are 15-minute interval-average power, so
-  `energy (MWh) = Power (MW) × 0.25 h` (rectangle integration — exact for
-  interval data).
-- **Revenue convention — net, stated explicitly**:
-  `revenue = Power × 0.25 × Market Price`; discharge earns, charging costs.
-  Net revenue is the decision metric for the outage question because an
-  offline site loses discharge income *and* avoids charging cost. Gross
-  discharge value is reported alongside. Under net, Frequency Regulation is
-  slightly negative — expected, since FR availability payments are not in the
-  dataset.
-- **Average daily revenue per mode**: revenue summed per (day, mode), then
-  averaged over the days each mode was active — "what does a day of running
-  this mode earn", not diluted across all calendar days.
-- **Lowest-revenue 14-day window**: daily net revenue → 14-day rolling sum,
-  sliding one day at a time, window constrained fully inside 1 Jan – 31 Mar
-  2024 (78 candidates). Result cross-checked with a brute-force loop.
-- **SQL**: SQLite via the Python standard library — zero extra dependencies,
-  and the `queries.sql` deliverable stays a plain, runnable file.
-- **Validation**: `analysis.py` fails fast if the CSV has missing columns,
-  nulls, duplicates, or gaps in the 15-minute grid (it currently has none),
-  and asserts pandas and SQL totals agree.
+`analysis.py` also validates the input on load (columns present, no nulls, no gaps in
+the 15-minute grid) and fails fast with a clear message if something's off.
 
-### Assumptions (Part 1)
+## Assumptions
 
-1. All energy settles at the given market price; no FR availability fees,
-   network charges, or degradation costs (not present in the data).
-2. Positive power = discharge, negative = charge (per the spec).
-3. The outage is whole calendar days, fully inside Q1 2024.
-4. Q1 2024 history is a proxy for the future outage period (no forecasting).
+- All energy settles at the given market price — no FR availability fees, network
+  charges, or degradation costs, since none are in the data.
+- Positive power = discharge, negative = charge (per the spec).
+- The outage is whole calendar days, scheduled fully inside Q1 2024.
 
-### With more time
+One thing worth being upfront about: the window is chosen with full hindsight over the
+whole quarter's prices. In reality you'd have to commit to a maintenance date in
+advance, before those prices are known — so a real deployment would need a price
+forecast and would carry the risk of that forecast being wrong.
 
-- Forecast prices for the actual outage year instead of using one historical
-  quarter.
-- Model FR availability revenue if contract terms were available.
-- Use SOC and the FR signal for deeper analysis (cycling behaviour,
-  regulation performance).
+## What I'd do with more time
+
+- Forecast prices for the actual outage period instead of leaning on realized history.
+- Add FR availability revenue if the contract terms were available, so that mode's
+  economics are complete.
+- Use the two columns I left untouched: **SOC** to sanity-check the energy accounting
+  (does the change in SOC over an interval line up with the integrated power?) and to
+  look at cycling depth as an early degradation signal; and the **Frequency Regulation
+  Signal** compared against dispatched power during FR mode, to measure how closely the
+  battery actually tracks the grid — a service-quality view, not just a revenue one.
 
 ## Part 2 — Fleet log intelligence (to follow)
-
-## Repository layout
-
-```
-analysis.py      Part 1 analysis
-queries.sql      SQL deliverable (Part 1; Part 2 appended later)
-data/            input datasets
-outputs/         generated chart, SQLite DB, console output
-report.md        stakeholder-facing findings
-```
