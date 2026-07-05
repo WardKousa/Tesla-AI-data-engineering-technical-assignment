@@ -39,6 +39,7 @@ QUERIES_PATH = Path("queries.sql")
 CHART_PATH = Path("outputs/part1_outage_window.png")
 
 INTERVAL_HOURS = 0.25  # data is on a 15-minute grid
+CAPACITY_MWH = 200  # 200 MWh site, per the assignment spec
 OUTAGE_DAYS = 14
 QUARTER_START = pd.Timestamp("2024-01-01")
 QUARTER_END = pd.Timestamp("2024-03-31")  # window must end on/before this day
@@ -82,13 +83,30 @@ def load_data(path: Path) -> pd.DataFrame:
 
 
 def energy_summary(df: pd.DataFrame) -> dict[str, float]:
-    """Total energy discharged and charged over the full dataset (MWh)."""
+    """Total energy discharged and charged over the full dataset (MWh).
+
+    Also reconstructs the change in stored energy from SOC so the raw
+    discharged/charged imbalance can be sanity-checked against physics.
+    """
     discharged = df.loc[df["energy_mwh"] > 0, "energy_mwh"].sum()
     charged = -df.loc[df["energy_mwh"] < 0, "energy_mwh"].sum()
+    soc_start = df["SOC (%)"].iloc[0]
+    soc_end = df["SOC (%)"].iloc[-1]
+    # Energy released from storage over the period (positive means the
+    # battery ended emptier than it started).
+    stored_released = CAPACITY_MWH * (soc_start - soc_end) / 100
+    # Energy balance: charged + stored_released = discharged + losses, so a
+    # real battery must have losses > 0. A near-zero or negative implied
+    # loss is physically impossible.
+    implied_loss = charged + stored_released - discharged
     return {
         "discharged_mwh": discharged,
         "charged_mwh": charged,
         "ratio_discharged_over_charged": discharged / charged,
+        "soc_start": soc_start,
+        "soc_end": soc_end,
+        "stored_released_mwh": stored_released,
+        "implied_loss_mwh": implied_loss,
     }
 
 
@@ -97,7 +115,7 @@ def revenue_by_mode(df: pd.DataFrame) -> pd.DataFrame:
 
     A mode's daily revenue is summed per calendar date, then averaged
     over the dates on which that mode was active (not all calendar
-    days) — this answers "how much does a day of running this mode
+    days), which answers "how much does a day of running this mode
     earn", which is the operationally meaningful rate.
     """
     gross = df["revenue_gbp"].clip(lower=0)  # discharge income only
@@ -230,9 +248,20 @@ def main() -> None:
     print(f"Total charged:    {energy['charged_mwh']:>12,.1f} MWh")
     ratio = energy["ratio_discharged_over_charged"]
     print(f"Discharged/charged ratio: {ratio:.3f}")
-    if ratio > 1:
-        print("  NOTE: ratio > 1 is physically implausible for a real battery "
-              "(round-trip losses mean energy out < energy in); flags this as "
+    # The raw ratio > 1 looks impossible at first, but the battery ends much
+    # emptier than it starts, releasing stored energy that closes most of the
+    # gap. What is left after that SOC correction is the real tell.
+    gap = energy["discharged_mwh"] - energy["charged_mwh"]
+    print(f"SOC {energy['soc_start']:.1f}% -> {energy['soc_end']:.1f}% releases "
+          f"{energy['stored_released_mwh']:,.0f} MWh of stored energy, "
+          f"explaining the {gap:,.0f} MWh discharge/charge gap.")
+    print(f"Implied round-trip loss after that correction: "
+          f"{energy['implied_loss_mwh']:,.1f} MWh")
+    if energy["implied_loss_mwh"] <= 0:
+        print("  NOTE: a real battery ALWAYS loses some energy on every charge "
+              "and discharge (round-trip efficiency is typically 85-92%), so the "
+              "implied loss must be clearly positive. A near-zero or negative "
+              "loss is physically impossible, so this is almost certainly "
               "synthetic/simulated data.")
 
     print("\n-- Step 1b: Average daily revenue per mode (GBP/day) " + "-" * 16)
