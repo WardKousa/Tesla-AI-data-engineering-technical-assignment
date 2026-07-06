@@ -1,3 +1,5 @@
 __pycache__/
 .venv/
 outputs/bess.db
+outputs/logs.db
+outputs/log_events.csv
