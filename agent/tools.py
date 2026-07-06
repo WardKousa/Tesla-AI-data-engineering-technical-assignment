@@ -1,0 +1,306 @@
+"""Part 2, Step 4: the five tools the agent harness routes to.
+
+Every tool is a plain, deterministic Python function over the structured
+log database (outputs/logs.db). All numbers, timestamps, charts and JSON
+the agent ever outputs are computed HERE, by ordinary code -- the LLM (or
+the fallback router) only decides which tool to call and phrases the
+answer. Tools return JSON-serializable dicts; anything the tools cannot
+provide comes back as an explicit {"error": ...} rather than a guess,
+which is what lets the harness say "I can't answer that" instead of
+hallucinating.
+"""
+
+from __future__ import annotations
+
+import sys
+from functools import lru_cache
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:  # allow `python agent/...` as well as `python -m agent...`
+    sys.path.insert(0, str(ROOT))
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+
+import diagnostics
+from diagnostics import AXIS, GRID, INK, SEV_COLOR, SEV_MARKER
+
+SUBSYSTEMS = {"BMS", "Battery", "Inverter", "Site", "Thermal", "UNKNOWN"}
+SEVERITIES = {"INFO", "WARNING", "ERROR", "CRITICAL", "UNKNOWN"}
+METRICS = {"temperature", "coolant_flow", "fan_speed", "pump_speed", "voltage",
+           "cell_voltage", "cell_voltage_diff", "charge_current",
+           "discharge_current", "soc", "grid_frequency", "ac_output", "power_limit"}
+METRIC_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#4a3aa7"]  # fixed assignment order
+MAX_ROWS = 100
+
+# Recommended action per fleet-health issue type, used by the ticket tool.
+ACTIONS = {
+    "coolant_flow_loss": "Inspect and service/replace the coolant pump; verify loop "
+                         "pressure and check for leaks or blockages before restart.",
+    "thermal_event": "Verify thermal sensors and fan operation; review temperature "
+                     "trends after the coolant loop is serviced.",
+    "protective_shutdown": "Run the safe-restart checklist and confirm all derates "
+                           "cleared before returning the site to full dispatch.",
+    "cell_imbalance": "Inspect the flagged battery module and run cell-balancing "
+                      "diagnostics.",
+    "voltage_drop": "Check interconnects and cell health on the affected module.",
+    "soc_mismatch": "Recalibrate SOC estimation across modules.",
+    "grid_sync_instability": "No action required: externally driven grid event that "
+                             "self-resolved.",
+}
+
+
+@lru_cache(maxsize=1)
+def _events() -> pd.DataFrame:
+    return diagnostics.load_events()
+
+
+def _bounds() -> tuple[pd.Timestamp, pd.Timestamp]:
+    ts = _events()["timestamp"]
+    return ts.min(), ts.max()
+
+
+def _parse_when(text: str | None, name: str) -> pd.Timestamp | None:
+    """Parse a user-supplied time; error clearly if outside the data."""
+    if text is None:
+        return None
+    try:
+        when = pd.Timestamp(text)
+    except ValueError:
+        raise ValueError(f"{name}={text!r} is not a valid timestamp")
+    lo, hi = _bounds()
+    if when < lo - pd.Timedelta(days=1) or when > hi + pd.Timedelta(days=1):
+        raise ValueError(f"{name}={text!r} is outside the data range {lo} .. {hi}")
+    return when
+
+
+def query_events(subsystem: str | None = None, severity: str | None = None,
+                 metric: str | None = None, start: str | None = None,
+                 end: str | None = None, limit: int = 20) -> dict:
+    """Filtered log events, newest limits first kept chronological."""
+    for value, valid, label in ((subsystem, SUBSYSTEMS, "subsystem"),
+                                (severity, SEVERITIES, "severity"),
+                                (metric, METRICS, "metric")):
+        if value is not None and value not in valid:
+            return {"error": f"unknown {label} {value!r}; valid: {sorted(valid)}"}
+    try:
+        t0, t1 = _parse_when(start, "start"), _parse_when(end, "end")
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    df = _events()
+    if subsystem:
+        df = df[df["subsystem"] == subsystem]
+    if severity:
+        df = df[df["severity"] == severity]
+    if metric:
+        df = df[df["metric"] == metric]
+    if t0 is not None:
+        df = df[df["timestamp"] >= t0]
+    if t1 is not None:
+        df = df[df["timestamp"] <= t1]
+
+    limit = max(1, min(int(limit), MAX_ROWS))
+    rows = df.head(limit)[["timestamp", "subsystem", "severity", "message",
+                           "metric", "value", "unit", "module"]].copy()
+    rows["timestamp"] = rows["timestamp"].astype(str)
+    records = rows.astype(object).where(rows.notna(), None).to_dict("records")
+    result = {"total_matching": int(len(df)), "returned": int(len(rows)),
+              "events": records}
+    if len(df) == 0:
+        lo, hi = _bounds()
+        result["note"] = f"no matching events; the log covers {lo} to {hi}"
+    return result
+
+
+def event_stats(group_by: list[str] | None = None, subsystem: str | None = None,
+                severity: str | None = None, metric: str | None = None,
+                date: str | None = None) -> dict:
+    """Counts grouped by the given columns; value stats when metric is set."""
+    group_by = group_by or ["subsystem", "severity"]
+    valid_groups = {"subsystem", "severity", "date", "hour", "metric", "message_template"}
+    bad = [g for g in group_by if g not in valid_groups]
+    if bad:
+        return {"error": f"cannot group by {bad}; valid: {sorted(valid_groups)}"}
+
+    df = _events()
+    for col, value in (("subsystem", subsystem), ("severity", severity),
+                       ("metric", metric), ("date", date)):
+        if value is not None:
+            df = df[df[col] == value]
+    if df.empty:
+        return {"total": 0, "note": "no events match those filters",
+                "counts": []}
+
+    counts = (df.groupby(group_by).size().rename("n_events")
+              .reset_index().to_dict("records"))
+    result = {"total": int(len(df)), "counts": counts}
+    if metric:
+        values = df["value"].dropna()
+        result["value_stats"] = {"metric": metric, "unit": df["unit"].dropna().iloc[0],
+                                 "min": float(values.min()), "max": float(values.max()),
+                                 "mean": round(float(values.mean()), 2),
+                                 "n": int(len(values))}
+    return result
+
+
+def plot_signals(metrics: list[str], start: str | None = None, end: str | None = None,
+                 highlight_alerts: bool = True, around_incident: bool = False) -> dict:
+    """Chart the given metrics over time (one stacked panel per metric).
+
+    around_incident=True centres the window on the most severe episode.
+    Saves a PNG to outputs/ and returns its path.
+    """
+    metrics = list(dict.fromkeys(metrics))  # dedupe, keep order
+    unknown = [m for m in metrics if m not in METRICS]
+    if unknown or not metrics:
+        return {"error": f"unknown metrics {unknown}; valid: {sorted(METRICS)}"}
+    if len(metrics) > len(METRIC_COLORS):
+        return {"error": f"at most {len(METRIC_COLORS)} metrics per chart"}
+
+    events = _events()
+    if around_incident:
+        incident = diagnostics.reconstruct_incident(
+            events, diagnostics.detect_episodes(events)[0])
+        t0 = incident["episode"]["start"] - pd.Timedelta(minutes=45)
+        recovered = incident["timings"]["recovered"]
+        t1 = (recovered if pd.notna(recovered) else incident["episode"]["end"]) \
+            + pd.Timedelta(minutes=20)
+    else:
+        try:
+            t0, t1 = _parse_when(start, "start"), _parse_when(end, "end")
+        except ValueError as exc:
+            return {"error": str(exc)}
+        lo, hi = _bounds()
+        t0, t1 = t0 or lo, t1 or hi
+
+    window = events[(events["timestamp"] >= t0) & (events["timestamp"] <= t1)]
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 3.2 * len(metrics)),
+                             sharex=True, squeeze=False)
+    n_points = {}
+    for ax, metric, color in zip(axes.ravel(), metrics, METRIC_COLORS):
+        series = window[window["metric"] == metric]
+        n_points[metric] = int(len(series))
+        ax.plot(series["timestamp"], series["value"], color=color, linewidth=2)
+        if highlight_alerts:
+            for sev in ("WARNING", "ERROR", "CRITICAL"):
+                pts = series[series["severity"] == sev]
+                if pts.empty:
+                    continue
+                ax.scatter(pts["timestamp"], pts["value"], s=90, zorder=3,
+                           marker=SEV_MARKER[sev], color=SEV_COLOR[sev],
+                           edgecolor="white", linewidth=1.5, label=sev.title())
+        unit = series["unit"].dropna().iloc[0] if not series["value"].dropna().empty else ""
+        ax.set_ylabel(f"{metric} ({unit})" if unit else metric, color=INK)
+        ax.grid(color=GRID, linewidth=0.8)
+        ax.tick_params(colors=INK)
+        for spine in ax.spines.values():
+            spine.set_color(AXIS)
+    if all(n == 0 for n in n_points.values()):
+        plt.close(fig)
+        return {"error": f"no readings for {metrics} between {t0} and {t1}"}
+
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    if handles:
+        axes.ravel()[0].legend(handles, labels, loc="best", fontsize=9)
+    axes.ravel()[-1].xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M"))
+    axes.ravel()[0].set_title(", ".join(metrics) + f"  ({t0:%Y-%m-%d %H:%M} to {t1:%H:%M})",
+                              color=INK)
+    fig.tight_layout()
+    path = Path("outputs") / f"agent_plot_{'_'.join(metrics)}.png"
+    path.parent.mkdir(exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return {"chart_path": str(path), "metrics": metrics, "n_points": n_points,
+            "window": [str(t0), str(t1)], "alerts_highlighted": bool(highlight_alerts)}
+
+
+def _episode_json(ep: dict, events: pd.DataFrame) -> dict:
+    label, rationale = diagnostics.classify_episode(ep, events)
+    return {"rank": ep["rank"], "start": str(ep["start"]), "end": str(ep["end"]),
+            "duration_min": round((ep["end"] - ep["start"]).total_seconds() / 60, 1),
+            "alerts": {"warning": ep["n_warning"], "error": ep["n_error"],
+                       "critical": ep["n_critical"]},
+            "severity_score": ep["score"], "subsystems": ep["subsystems"],
+            "issue_types": ep["tags"], "classification": label, "evidence": rationale}
+
+
+def summarize_incident(date: str | None = None) -> dict:
+    """Structured JSON summary of the most severe episode (optionally on a date)."""
+    events = _events()
+    episodes = diagnostics.detect_episodes(events)
+    if date is not None:
+        episodes = [ep for ep in episodes if str(ep["start"].date()) == date]
+        if not episodes:
+            days = sorted({str(ep["start"].date())
+                           for ep in diagnostics.detect_episodes(events)})
+            return {"error": f"no alert episodes on {date}; episodes occurred on {days}"}
+
+    top = episodes[0]
+    incident = diagnostics.reconstruct_incident(events, top)
+    t = incident["timings"]
+    timeline = [{"time": str(row.timestamp), "subsystem": row.subsystem,
+                 "severity": row.severity, "message": row.message}
+                for row in incident["timeline"].itertuples()]
+    return {
+        "episode": _episode_json(top, events),
+        "all_episodes": [_episode_json(ep, events)
+                         for ep in diagnostics.detect_episodes(events)],
+        "timeline": timeline,
+        "timings": {k: (str(v) if isinstance(v, pd.Timestamp) else v)
+                    for k, v in t.items()},
+        "root_cause": "Coolant pump/flow failure: coolant flow collapsed from nominal "
+                      "~6-11 L/min to 1.8 L/min, temperature rose past the safe "
+                      "threshold within ~10 minutes, BMS applied a thermal derate, the "
+                      "inverter tripped on overtemperature and the site executed a "
+                      "protective shutdown. Recovery followed a coolant pump restart.",
+    }
+
+
+def draft_service_ticket() -> dict:
+    """Service ticket (JSON + rendered text) for the most severe issue."""
+    events = _events()
+    top = diagnostics.detect_episodes(events)[0]
+    incident = diagnostics.reconstruct_incident(events, top)
+    t = incident["timings"]
+    label, rationale = diagnostics.classify_episode(top, events)
+
+    evidence = [f"{row.timestamp:%H:%M:%S} [{row.subsystem}/{row.severity}] {row.message}"
+                for row in incident["timeline"].itertuples()
+                if row.severity in ("WARNING", "ERROR", "CRITICAL")]
+    ticket = {
+        "ticket_id": f"MP-{top['start']:%Y%m%d}-001",
+        "title": "Coolant-flow collapse led to overtemperature protective shutdown",
+        "priority": "P1" if top["n_critical"] else "P2",
+        "status": "OPEN",
+        "site": "Megapack site (MP_Logs)",
+        "affected_subsystems": top["subsystems"],
+        "issue_types": top["tags"],
+        "classification": label,
+        "root_cause": "Coolant pump/flow failure in the thermal loop (internal fault). "
+                      + rationale,
+        "first_warning": str(t["first_warning"]),
+        "trip": str(t["trip"]),
+        "recovered": str(t["recovered"]),
+        "warning_to_trip_min": t["warning_to_trip_min"],
+        "downtime_min": t["downtime_min"],
+        "evidence": evidence,
+        "recommended_actions": [ACTIONS[tag] for tag in top["tags"] if tag in ACTIONS],
+    }
+    lines = [f"SERVICE TICKET {ticket['ticket_id']}  [{ticket['priority']}]",
+             f"Title: {ticket['title']}",
+             f"Affected subsystems: {', '.join(ticket['affected_subsystems'])}",
+             f"Issue types: {', '.join(ticket['issue_types'])}",
+             f"Root cause: {ticket['root_cause']}",
+             f"Timeline: first warning {ticket['first_warning']} -> trip {ticket['trip']}"
+             f" ({t['warning_to_trip_min']:.1f} min) -> recovered {ticket['recovered']}"
+             f" (downtime {t['downtime_min']:.0f} min)",
+             "Recommended actions:"]
+    lines += [f"  - {a}" for a in ticket["recommended_actions"]]
+    ticket["rendered_text"] = "\n".join(lines)
+    return ticket
