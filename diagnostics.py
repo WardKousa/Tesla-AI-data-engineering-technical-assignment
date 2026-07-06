@@ -224,7 +224,7 @@ def plot_incident(events: pd.DataFrame, incident: dict) -> None:
     window = events[(events["timestamp"] >= start) & (events["timestamp"] <= end)]
 
     fig, (ax_temp, ax_flow) = plt.subplots(
-        2, 1, figsize=(12, 7), sharex=True, gridspec_kw={"hspace": 0.08})
+        2, 1, figsize=(12, 7), sharex=True, layout="constrained")
     panels = [(ax_temp, "temperature", "Temperature (°C)", "#2a78d6"),
               (ax_flow, "coolant_flow", "Coolant flow (L/min)", "#1baf7a")]
 
@@ -271,7 +271,6 @@ def plot_incident(events: pd.DataFrame, incident: dict) -> None:
     ax_flow.set_xlabel(f"{ep['start']:%d %b %Y}", color=INK)
     ax_temp.set_title("Megapack thermal incident: coolant-flow collapse -> overtemperature trip",
                       color=INK)
-    fig.tight_layout()
     CHART_PATH.parent.mkdir(exist_ok=True)
     fig.savefig(CHART_PATH, dpi=150)
     plt.close(fig)

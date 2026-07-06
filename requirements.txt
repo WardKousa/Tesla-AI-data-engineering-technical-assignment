@@ -1,2 +1,3 @@
 pandas>=2.0
 matplotlib>=3.7
+anthropic>=0.40  # only needed for the agent's LLM mode (ANTHROPIC_API_KEY set)

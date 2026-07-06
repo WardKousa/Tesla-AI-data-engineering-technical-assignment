@@ -1,0 +1,165 @@
+======================================================================
+PART 2, STEP 1 - LOG ETL
+Input: data\MP_Logs.txt  (5,746 lines, 2026-06-16 06:00:00 -> 2026-06-18 20:59:43)
+Parsed events: 5,744   rejected: 1   blank: 1
+
+-- Malformed-line handling ------------------------------------------
+  salvaged line 71: severity field missing; set to UNKNOWN
+  salvaged line 106: timestamp missing seconds; assumed :00
+  salvaged line 176: subsystem field empty; set to UNKNOWN
+  rejected line 141: does not match 'timestamp | subsystem | severity | message'  [CORRUPTED ENTRY ### sensor dropout]
+  (+ 5,741 well-formed lines, 1 blank line skipped)
+
+-- Events by subsystem x severity -----------------------------------
+severity   CRITICAL  ERROR  INFO  UNKNOWN  WARNING
+subsystem                                         
+BMS               0      3   246        0       20
+Battery           0      0  2805        1        5
+Inverter          1      1  1137        0        8
+Site              1      0   133        0        0
+Thermal           0      3  1376        0        3
+UNKNOWN           0      0     1        0        0
+
+Measurements extracted: 5,563 rows (97%) across 13 metrics; 50 rows carry a module number.
+
+-- Validation -------------------------------------------------------
+  OK  alert rows (WARNING/ERROR/CRITICAL) == 45 (got 45)
+  OK  salvaged rows == 3 (got 3)
+  OK  rejected lines == 1 (got 1)
+  OK  blank lines == 1 (got 1)
+
+SQLite DB saved to outputs\logs.db (tables: log_events, rejected_lines)
+CSV saved to outputs\log_events.csv
+
+======================================================================
+PART 2, STEP 2 - DIAGNOSTICS AND ROOT-CAUSE ANALYSIS
+5,744 events, 2026-06-16 -> 2026-06-18; 'today' = 2026-06-18
+
+-- Events by subsystem x severity -----------------------------------
+severity   CRITICAL  ERROR  INFO  UNKNOWN  WARNING
+subsystem                                         
+BMS               0      3   246        0       20
+Battery           0      0  2805        1        5
+Inverter          1      1  1137        0        8
+Site              1      0   133        0        0
+Thermal           0      3  1376        0        3
+UNKNOWN           0      0     1        0        0
+
+-- Alert activity by calendar hour (WARNING/ERROR/CRITICAL) --------
+date        hour
+2026-06-16  8        7
+2026-06-17  12       4
+            13       7
+            14       7
+            15       5
+            16       3
+2026-06-18  13      12
+
+-- Fleet-health episodes, ranked by severity-weighted score --------
+
+  #1  2026-06-18 13:22 -> 13:35  (13 min, score 50)
+      alerts: 5 WARNING / 5 ERROR / 2 CRITICAL   subsystems: BMS, Inverter, Site, Thermal
+      issue types: coolant_flow_loss, protective_shutdown, thermal_event
+      verdict: INTERNAL fault, protective trip - cross-subsystem escalation (BMS, Inverter, Site, Thermal) ending in a protective shutdown; back online at 13:51:00
+
+  #2  2026-06-17 12:04 -> 16:04  (240 min, score 34)
+      alerts: 24 WARNING / 2 ERROR / 0 CRITICAL   subsystems: BMS, Battery
+      issue types: cell_imbalance, soc_mismatch, voltage_drop
+      verdict: INTERNAL fault, unresolved - progressive on-board degradation with no recovery marker; ends flagged for inspection, needs intervention
+
+  #3  2026-06-16 08:31 -> 08:34  (3 min, score 7)
+      alerts: 7 WARNING / 0 ERROR / 0 CRITICAL   subsystems: Inverter
+      issue types: grid_sync_instability
+      verdict: EXTERNAL, self-resolving - all alerts are grid-side signals; no internal subsystem alerted; re-synced without intervention at 08:37:34 ('Grid sync established')
+
+-- Incident reconstruction (top-ranked episode) ---------------------
+  13:22:00  Thermal  WARNING  Coolant loop flow low: 3.60 L/min  [coolant_flow=3.6 L/min]
+  13:25:00  Thermal  WARNING  Fan at maximum speed: 4950 RPM  [fan_speed=4950 RPM]
+  13:27:00  Thermal  WARNING  Temperature approaching safe threshold: 61.2°C  [temperature=61.2 °C]
+  13:28:00  Thermal  ERROR    Coolant flow below minimum threshold: 1.80 L/min  [coolant_flow=1.8 L/min]
+  13:29:00  BMS      WARNING  Thermal derate applied
+  13:30:00  Inverter WARNING  Power derated due to thermal limit: 70 kW  [power_limit=70 kW]
+  13:31:00  Thermal  ERROR    Temperature exceeded safe threshold: 69.4°C  [temperature=69.4 °C]
+  13:32:00  Thermal  ERROR    Temperature exceeded safe threshold: 74.8°C  [temperature=74.8 °C]
+  13:33:00  BMS      ERROR    Overtemperature fault Module 7: 78.1°C  [temperature=78.1 °C]
+  13:34:00  Inverter ERROR    Inverter trip - overtemperature
+  13:34:30  Inverter CRITICAL Inverter shutdown - thermal protection
+  13:35:00  Site     CRITICAL Megapack offline - protective shutdown
+  13:35:10  Inverter INFO     AC output: 0.0 kW  [ac_output=0 kW]
+  13:45:00  Thermal  INFO     Coolant pump restarted
+  13:47:00  BMS      INFO     Thermal derate cleared
+  13:49:00  Inverter INFO     Grid sync established
+  13:51:00  Site     INFO     Megapack online
+
+  First warning:        13:22:00
+  First error:          13:28:00
+  Trip (first CRITICAL):13:34:30   -> 12.5 min from first warning
+  Site offline:         13:35:00
+  Recovered (online):   13:51:00   -> downtime 16 min, episode 29 min
+
+  Root cause (evidence-backed): coolant flow collapsed from nominal
+  ~6-11 L/min to 1.8 L/min in ~11 minutes (pump degradation - pump speed
+  71% shortly before). With cooling lost, temperature rose ~30°C in 10
+  minutes past the safe threshold; BMS applied a thermal derate, the
+  inverter derated then tripped on overtemperature, and the site executed
+  a protective shutdown. Cooling was restored by a coolant pump restart,
+  after which the site re-synced and resumed dispatch. The trigger is an
+  internal thermal-loop fault (coolant pump), not an external grid event.
+
+======================================================================
+PART 2, STEP 3 - SQL INSIGHTS (queries.sql, Part 2 section)
+
+  [subsystem, severity, n_events]
+    ('BMS', 'ERROR', 3)
+    ('BMS', 'INFO', 246)
+    ('BMS', 'WARNING', 20)
+    ('Battery', 'INFO', 2805)
+    ('Battery', 'UNKNOWN', 1)
+    ('Battery', 'WARNING', 5)
+    ('Inverter', 'CRITICAL', 1)
+    ('Inverter', 'ERROR', 1)
+    ('Inverter', 'INFO', 1137)
+    ('Inverter', 'WARNING', 8)
+    ('Site', 'CRITICAL', 1)
+    ('Site', 'INFO', 133)
+    ('Thermal', 'ERROR', 3)
+    ('Thermal', 'INFO', 1376)
+    ('Thermal', 'WARNING', 3)
+    ('UNKNOWN', 'INFO', 1)
+
+  [date, hour, n_alerts]
+    ('2026-06-18', 13, 12)
+
+  [message_template, severity, n, first_seen, last_seen]
+    ('Grid frequency out of band: N Hz', 'WARNING', 1, '2026-06-16 08:31:20', '2026-06-16 08:31:20')
+    ('Grid sync lost, retrying...', 'WARNING', 6, '2026-06-16 08:32:00', '2026-06-16 08:34:14')
+    ('SOC mismatch across modules', 'WARNING', 5, '2026-06-17 12:04:00', '2026-06-17 14:14:00')
+    ('Cell imbalance detected in Module N: NV', 'WARNING', 18, '2026-06-17 12:46:40', '2026-06-17 15:52:40')
+    ('Critical voltage drop detected: NV (Module N)', 'ERROR', 1, '2026-06-17 16:02:00', '2026-06-17 16:02:00')
+    ('Cell undervoltage Module N: N V/cell', 'ERROR', 1, '2026-06-17 16:02:30', '2026-06-17 16:02:30')
+    ('Module N flagged for inspection', 'WARNING', 1, '2026-06-17 16:04:00', '2026-06-17 16:04:00')
+    ('Coolant loop flow low: N L/min', 'WARNING', 1, '2026-06-18 13:22:00', '2026-06-18 13:22:00')
+    ('Fan at maximum speed: N RPM', 'WARNING', 1, '2026-06-18 13:25:00', '2026-06-18 13:25:00')
+    ('Temperature approaching safe threshold: N°C', 'WARNING', 1, '2026-06-18 13:27:00', '2026-06-18 13:27:00')
+    ('Coolant flow below minimum threshold: N L/min', 'ERROR', 1, '2026-06-18 13:28:00', '2026-06-18 13:28:00')
+    ('Thermal derate applied', 'WARNING', 1, '2026-06-18 13:29:00', '2026-06-18 13:29:00')
+    ('Power derated due to thermal limit: N kW', 'WARNING', 1, '2026-06-18 13:30:00', '2026-06-18 13:30:00')
+    ('Temperature exceeded safe threshold: N°C', 'ERROR', 2, '2026-06-18 13:31:00', '2026-06-18 13:32:00')
+    ('Overtemperature fault Module N: N°C', 'ERROR', 1, '2026-06-18 13:33:00', '2026-06-18 13:33:00')
+    ('Inverter trip - overtemperature', 'ERROR', 1, '2026-06-18 13:34:00', '2026-06-18 13:34:00')
+    ('Inverter shutdown - thermal protection', 'CRITICAL', 1, '2026-06-18 13:34:30', '2026-06-18 13:34:30')
+    ('Megapack offline - protective shutdown', 'CRITICAL', 1, '2026-06-18 13:35:00', '2026-06-18 13:35:00')
+
+  [mean_thermal_alert_temp_c, n_rows]
+    (68.47, 3)
+
+  Cross-checks passed: SQL row count and thermal mean match pandas.
+
+Chart saved to outputs\part2_incident.png
+
+-- Ground-truth checks ----------------------------------------------
+  OK  episodes detected == 3 (got 3)
+  OK  busiest alert hour == 2026-06-18 13:00 (got ('2026-06-18', 13))
+  OK  incident first warning == 13:22:00
+  OK  incident trip == 13:34:30
+  OK  incident recovery == 13:51:00

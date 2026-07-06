@@ -1,23 +1,29 @@
 # Tesla AI/Data Engineer Intern, Technical Assignment
 
-BESS revenue analysis (Part 1) and, to follow, fleet log intelligence with an
-agentic harness (Part 2).
+BESS revenue analysis (Part 1) and fleet log intelligence with an agentic
+harness (Part 2). Headline results and charts for both parts are in
+[report.md](report.md).
 
 ## How to run
 
 ```bash
 pip install -r requirements.txt
+
+# Part 1 - BESS revenue analysis
 python analysis.py
+
+# Part 2 - log ETL, diagnostics, agent demo
+python etl.py
+python diagnostics.py
+python -m agent.run_demo
+python -m agent.harness "how many errors per subsystem"   # ask your own question
 ```
 
-Requires Python 3.10+. The script prints the full analysis to the console and writes
-two things to `outputs/`:
-
-- `part1_outage_window.png`, the chart used in the report
-- `bess.db`, a SQLite database you can run `queries.sql` against directly
-  (`sqlite3 outputs/bess.db < queries.sql`)
-
-The headline result and chart are in [report.md](report.md).
+Requires Python 3.10+. Everything runs offline with no API key; setting
+`ANTHROPIC_API_KEY` upgrades the Part 2 agent from the keyword router to real
+LLM tool-calling (see Part 2 below). Outputs land in `outputs/`: charts used in
+the report, `bess.db` / `logs.db` (SQLite databases you can run `queries.sql`
+against), and saved console output for both parts.
 
 ## Approach
 
@@ -87,4 +93,84 @@ forecast and would carry the risk of that forecast being wrong.
   the FR Signal against the actual power output to see how closely the battery follows
   the grid, which is a quality measure rather than a money one.
 
-## Part 2, Fleet log intelligence (to follow)
+## Part 2, Fleet log intelligence
+
+Parsing lives in `etl.py`, diagnostics in `diagnostics.py`, and the agent in
+`agent/` — deliberately separate files because they are different jobs: turning
+messy text into a trustworthy table (deterministic ETL), interpreting that table
+(analysis), and exposing it to natural language (automation).
+
+### Approach
+
+**ETL.** The log looks clean but isn't: of 5,746 lines, five are malformed. The
+policy is *never silently drop* — every input line is accounted for. Lines that
+can be salvaged safely are kept with an explicit `salvage_note` (missing
+severity → `UNKNOWN`, empty subsystem → `UNKNOWN`, a truncated timestamp →
+seconds assumed `:00`); the one unparseable line (`CORRUPTED ENTRY ### sensor
+dropout`) is quarantined to a `rejected_lines` table with a reason, and one
+blank line is counted. Numeric values are extracted with one regex per message
+shape rather than "grab the first number", because in messages like
+`Overtemperature fault Module 7: 78.1°C` the module number comes first — a
+naive parser would store 7 instead of 78.1. Each row gets `metric`, `value`,
+`unit`, `module`, and a normalized `message_template` (numbers → N) that the
+SQL uses to group "error types".
+
+**Diagnostics.** Alerts (45 of 5,744 events) are clustered into episodes: a
+quiet gap of over an hour starts a new episode (alerts inside an ongoing issue
+recur every few minutes here, so an hour of silence separates unrelated
+stories). Each episode is scored (CRITICAL=10, ERROR=5, WARNING=1), tagged with
+the fleet-health issue types it contains (thermal event, coolant-flow loss,
+cell imbalance, voltage drop, grid-sync instability, SOC mismatch), and
+classified as internal vs externally-driven from evidence: grid-only signals
+plus self-recovery without a trip means external; a cross-subsystem escalation
+ending in a trip, or a progressive drift ending in an inspection flag, means
+internal. The three episodes this finds, and the reconstructed timeline of the
+18 June thermal incident, are in [report.md](report.md).
+
+**Agent.** Five deterministic tools over the structured database (query events,
+stats, plot signals, incident summary as JSON, service-ticket drafting) with
+two interchangeable routers on top. With `ANTHROPIC_API_KEY` set, a small LLM
+(`claude-haiku-4-5`) does real tool-calling: it picks the tools, reads their
+JSON results, and writes the answer. Without a key, a keyword router maps the
+assignment's prompts to the same tools and fills templates. The design rule is
+*LLM where language is the problem, plain code where correctness is the
+problem*: every number, timestamp and chart comes from a tool, never from the
+model, so answers are auditable against the database. Questions neither router
+can ground in tool results get an explicit "I can't answer that" — tools return
+structured errors (unknown metric, date outside the log) rather than defaults,
+so the LLM has nothing to hallucinate from, and the keyword router refuses
+anything unscripted. Known limitation of the fallback: it only handles the
+scripted intents, while LLM mode can compose tools for novel questions.
+`agent/transcript.md` shows the three assignment prompts answered end to end
+(text + JSON + chart).
+
+### Assumptions
+
+- Severity weights (10/5/1) and the 60-minute episode gap are judgment calls,
+  stated in code; results are not sensitive to reasonable alternatives.
+- "Today" is computed as the most recent calendar date in the file
+  (2026-06-18), not the wall-clock date, per the assignment's definition.
+- Ground-truth expectations about this specific file (45 alerts, 5 malformed
+  lines, 3 episodes) are printed ✓/⚠ checks, not hard asserts — the pipeline
+  stays usable on a different log file. Hard asserts are reserved for internal
+  consistency (line accounting, pandas-vs-SQL cross-checks).
+- The root-cause narrative names the coolant pump as the likely trigger (flow
+  collapsed while pump speed read 71%, and a pump restart fixed it); the logs
+  cannot distinguish pump wear from a blockage or a leak — that needs the site
+  visit the ticket recommends.
+
+### What I'd do with more time
+
+- **The bonus sections (B1 predictive RUL design, B2 auto-research agent
+  design)** — deliberately deferred to keep the core five steps polished; the
+  Module 4 imbalance data here would make a natural worked example for B1.
+- **Streaming ETL.** The parser reads the whole file; a real fleet emits logs
+  continuously, so the next step is incremental ingestion with the same
+  salvage/quarantine policy and idempotent upserts into the database.
+- **Learned thresholds.** Episode detection uses the log's own alert severities;
+  detecting *pre-alert* anomalies (the coolant flow was already sagging at
+  13:19, three minutes before the first WARNING) needs baselines per metric —
+  even simple rolling z-scores would have bought extra minutes of warning.
+- **Harden the agent.** Conversation memory (follow-up questions), a small eval
+  set of question/expected-tool pairs to regression-test routing, and running
+  the LLM answers against the JSON to auto-verify every quoted number.
