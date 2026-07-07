@@ -106,8 +106,9 @@ TOOL_SCHEMAS = [
         "name": "draft_service_ticket",
         "description": "Draft a service ticket (JSON + rendered text) for the most "
                        "severe issue in the logs: root cause, affected subsystems, "
-                       "evidence and recommended actions. Call this when the user asks "
-                       "for a ticket.",
+                       "evidence, recommended actions, and an attached evidence chart "
+                       "(attachment_chart). Call this when the user asks for a ticket; "
+                       "mention the attachment path in your answer.",
         "input_schema": {"type": "object", "properties": {},
                          "additionalProperties": False},
     },
@@ -255,6 +256,18 @@ def answer(question: str) -> dict:
     return run_fallback(question)
 
 
+def truncate_for_display(value, max_items: int = 8):
+    """Shorten long lists inside a JSON-able structure for readable output."""
+    if isinstance(value, dict):
+        return {k: truncate_for_display(v, max_items) for k, v in value.items()}
+    if isinstance(value, list) and len(value) > max_items:
+        return ([truncate_for_display(v, max_items) for v in value[:max_items]]
+                + [f"... ({len(value) - max_items} more items truncated)"])
+    if isinstance(value, list):
+        return [truncate_for_display(v, max_items) for v in value]
+    return value
+
+
 def main() -> None:
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -267,6 +280,12 @@ def main() -> None:
         print(f"  tool: {call['tool']}({json.dumps(call['input'], default=str)})")
     print()
     print(result["answer"])
+    # The structured output the assignment asks for, alongside the text.
+    print("\n--- JSON summary (tool results) " + "-" * 36)
+    for call in result["tool_calls"]:
+        print(f"\n[{call['tool']}]")
+        print(json.dumps(truncate_for_display(call["result"]), indent=2,
+                         default=str, ensure_ascii=False))
 
 
 if __name__ == "__main__":

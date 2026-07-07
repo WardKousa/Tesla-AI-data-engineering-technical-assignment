@@ -8,12 +8,12 @@ Usage:
 
 from __future__ import annotations
 
-import copy
 import json
 import sys
 from pathlib import Path
 
 from agent import harness
+from agent.harness import truncate_for_display
 
 PROMPTS = [
     "Summarize the thermal anomalies today and what likely caused them.",
@@ -22,19 +22,6 @@ PROMPTS = [
     "subsystem, recommended action.",
 ]
 TRANSCRIPT_PATH = Path(__file__).with_name("transcript.md")
-MAX_LIST_ITEMS = 8
-
-
-def _truncate(value, depth: int = 0):
-    """Deep-copy with long lists shortened so the transcript stays readable."""
-    if isinstance(value, dict):
-        return {k: _truncate(v, depth + 1) for k, v in value.items()}
-    if isinstance(value, list) and len(value) > MAX_LIST_ITEMS:
-        head = [_truncate(v, depth + 1) for v in value[:MAX_LIST_ITEMS]]
-        return head + [f"... ({len(value) - MAX_LIST_ITEMS} more items truncated)"]
-    if isinstance(value, list):
-        return [_truncate(v, depth + 1) for v in value]
-    return value
 
 
 def _render(result: dict) -> list[str]:
@@ -44,10 +31,10 @@ def _render(result: dict) -> list[str]:
         lines += [f"**Tool call {i}:** `{call['tool']}"
                   f"({json.dumps(call['input'], default=str)})`", "",
                   "```json",
-                  json.dumps(_truncate(copy.deepcopy(call["result"])),
+                  json.dumps(truncate_for_display(call["result"]),
                              indent=2, default=str, ensure_ascii=False),
                   "```", ""]
-        chart = call["result"].get("chart_path")
+        chart = call["result"].get("chart_path") or call["result"].get("attachment_chart")
         if chart:
             lines += [f"![chart](../{Path(chart).as_posix()})", ""]
     lines += ["**Answer:**", "", result["answer"], ""]

@@ -273,6 +273,9 @@ def draft_service_ticket() -> dict:
     evidence = [f"{row.timestamp:%H:%M:%S} [{row.subsystem}/{row.severity}] {row.message}"
                 for row in incident["timeline"].itertuples()
                 if row.severity in ("WARNING", "ERROR", "CRITICAL")]
+    # A real ticket ships with its evidence: attach the incident chart.
+    chart = plot_signals(["coolant_flow", "temperature"], around_incident=True,
+                         highlight_alerts=True)
     ticket = {
         "ticket_id": f"MP-{top['start']:%Y%m%d}-001",
         "title": "Coolant-flow collapse led to overtemperature protective shutdown",
@@ -290,6 +293,7 @@ def draft_service_ticket() -> dict:
         "warning_to_trip_min": t["warning_to_trip_min"],
         "downtime_min": t["downtime_min"],
         "evidence": evidence,
+        "attachment_chart": chart.get("chart_path"),
         "recommended_actions": [ACTIONS[tag] for tag in top["tags"] if tag in ACTIONS],
     }
     lines = [f"SERVICE TICKET {ticket['ticket_id']}  [{ticket['priority']}]",
@@ -302,5 +306,8 @@ def draft_service_ticket() -> dict:
              f" (downtime {t['downtime_min']:.0f} min)",
              "Recommended actions:"]
     lines += [f"  - {a}" for a in ticket["recommended_actions"]]
+    if ticket["attachment_chart"]:
+        lines.append(f"Attachment: {ticket['attachment_chart']} (coolant flow and "
+                     "temperature around the incident, alerts highlighted)")
     ticket["rendered_text"] = "\n".join(lines)
     return ticket
