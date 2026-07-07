@@ -37,6 +37,7 @@ METRICS = {"temperature", "coolant_flow", "fan_speed", "pump_speed", "voltage",
            "discharge_current", "soc", "grid_frequency", "ac_output", "power_limit"}
 METRIC_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#4a3aa7"]  # fixed assignment order
 MAX_ROWS = 100
+MIN_POINTS_TO_PLOT = 2  # a line needs two points; sparser metrics are dropped + reported
 
 # Recommended action per fleet-health issue type, used by the ticket tool.
 ACTIONS = {
@@ -180,12 +181,19 @@ def plot_signals(metrics: list[str], start: str | None = None, end: str | None =
         t0, t1 = t0 or lo, t1 or hi
 
     window = events[(events["timestamp"] >= t0) & (events["timestamp"] <= t1)]
-    fig, axes = plt.subplots(len(metrics), 1, figsize=(12, 3.2 * len(metrics)),
+    # A metric with <2 points in the window cannot form a line; allocating a
+    # panel for it yields a blank, autoscaled axis. Filter first, report drops.
+    counts = {m: int((window["metric"] == m).sum()) for m in metrics}
+    plotted = [m for m in metrics if counts[m] >= MIN_POINTS_TO_PLOT]
+    skipped = {m: counts[m] for m in metrics if counts[m] < MIN_POINTS_TO_PLOT}
+    if not plotted:
+        return {"error": f"no plottable metrics between {t0} and {t1} (a line "
+                         f"needs >= {MIN_POINTS_TO_PLOT} points); point counts: {counts}"}
+
+    fig, axes = plt.subplots(len(plotted), 1, figsize=(12, 3.2 * len(plotted)),
                              sharex=True, squeeze=False)
-    n_points = {}
-    for ax, metric, color in zip(axes.ravel(), metrics, METRIC_COLORS):
+    for ax, metric, color in zip(axes.ravel(), plotted, METRIC_COLORS):
         series = window[window["metric"] == metric]
-        n_points[metric] = int(len(series))
         ax.plot(series["timestamp"], series["value"], color=color, linewidth=2)
         if highlight_alerts:
             for sev in ("WARNING", "ERROR", "CRITICAL"):
@@ -201,23 +209,20 @@ def plot_signals(metrics: list[str], start: str | None = None, end: str | None =
         ax.tick_params(colors=INK)
         for spine in ax.spines.values():
             spine.set_color(AXIS)
-    if all(n == 0 for n in n_points.values()):
-        plt.close(fig)
-        return {"error": f"no readings for {metrics} between {t0} and {t1}"}
-
     handles, labels = axes.ravel()[0].get_legend_handles_labels()
     if handles:
         axes.ravel()[0].legend(handles, labels, loc="best", fontsize=9)
     axes.ravel()[-1].xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M"))
-    axes.ravel()[0].set_title(", ".join(metrics) + f"  ({t0:%Y-%m-%d %H:%M} to {t1:%H:%M})",
+    axes.ravel()[0].set_title(", ".join(plotted) + f"  ({t0:%Y-%m-%d %H:%M} to {t1:%H:%M})",
                               color=INK)
     fig.tight_layout()
-    path = Path("outputs") / f"agent_plot_{'_'.join(metrics)}.png"
+    path = Path("outputs") / f"agent_plot_{'_'.join(plotted)}.png"
     path.parent.mkdir(exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    return {"chart_path": str(path), "metrics": metrics, "n_points": n_points,
-            "window": [str(t0), str(t1)], "alerts_highlighted": bool(highlight_alerts)}
+    return {"chart_path": str(path), "metrics": plotted, "skipped_sparse": skipped,
+            "n_points": counts, "window": [str(t0), str(t1)],
+            "alerts_highlighted": bool(highlight_alerts)}
 
 
 def _episode_json(ep: dict, events: pd.DataFrame) -> dict:

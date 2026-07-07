@@ -74,7 +74,9 @@ TOOL_SCHEMAS = [
                        "WARNING/ERROR/CRITICAL readings highlighted. Set "
                        "around_incident=true to centre the window on the most severe "
                        "incident. Call this whenever the user asks for a plot or chart; "
-                       "report the returned chart_path to the user.",
+                       "report the returned chart_path to the user. Metrics with fewer "
+                       "than 2 readings in the window are omitted from the chart and "
+                       "reported in skipped_sparse - mention any omissions.",
         "input_schema": {
             "type": "object",
             "properties": {
