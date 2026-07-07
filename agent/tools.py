@@ -39,6 +39,27 @@ METRIC_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#4a3aa7"]  # fixed assignment
 MAX_ROWS = 100
 MIN_POINTS_TO_PLOT = 2  # a line needs two points; sparser metrics are dropped + reported
 
+# Per-issue-type knowledge used by the ticket tool. Everything episode-specific
+# (title, metrics, actions) is looked up from the episode's own tags at runtime,
+# so the tool works for ANY episode, not just the thermal incident.
+TAG_PHRASES = {  # human-readable fragment per issue type, for ticket titles
+    "coolant_flow_loss": "coolant-flow loss",
+    "thermal_event": "overtemperature",
+    "protective_shutdown": "protective shutdown",
+    "cell_imbalance": "progressive cell imbalance",
+    "voltage_drop": "voltage drop",
+    "soc_mismatch": "SOC mismatch",
+    "grid_sync_instability": "grid-sync instability",
+}
+TAG_METRICS = {  # dense, relevant evidence signals per issue type
+    "coolant_flow_loss": ["coolant_flow", "temperature"],
+    "thermal_event": ["temperature", "fan_speed"],
+    "protective_shutdown": ["ac_output"],
+    "cell_imbalance": ["cell_voltage_diff", "voltage"],
+    "voltage_drop": ["voltage"],
+    "soc_mismatch": ["soc"],
+    "grid_sync_instability": ["grid_frequency", "ac_output"],
+}
 # Recommended action per fleet-health issue type, used by the ticket tool.
 ACTIONS = {
     "coolant_flow_loss": "Inspect and service/replace the coolant pump; verify loop "
@@ -225,6 +246,27 @@ def plot_signals(metrics: list[str], start: str | None = None, end: str | None =
             "alerts_highlighted": bool(highlight_alerts)}
 
 
+def _tags_in_causal_order(ep: dict) -> list[str]:
+    """Episode tags ordered by when each issue type first appears in the
+    alert sequence (ep["tags"] is alphabetical; titles read better causally)."""
+    ordered: list[str] = []
+    for message in ep["alerts"]["message"]:
+        lowered = message.lower()
+        for needle, tag in diagnostics.TAG_RULES:
+            if needle in lowered and tag in ep["tags"] and tag not in ordered:
+                ordered.append(tag)
+    return ordered
+
+
+def _root_cause(ep: dict, events: pd.DataFrame) -> str:
+    """Evidence-derived root-cause statement for any episode: the first fault
+    signal (which is the causal origin in an escalation) plus classification."""
+    first = ep["alerts"].iloc[0]
+    label, rationale = diagnostics.classify_episode(ep, events)
+    return (f"First fault signal: '{first['message']}' ({first['subsystem']}, "
+            f"{first['timestamp']}). {label}: {rationale}.")
+
+
 def _episode_json(ep: dict, events: pd.DataFrame) -> dict:
     label, rationale = diagnostics.classify_episode(ep, events)
     return {"rank": ep["rank"], "start": str(ep["start"]), "end": str(ep["end"]),
@@ -259,60 +301,95 @@ def summarize_incident(date: str | None = None) -> dict:
         "timeline": timeline,
         "timings": {k: (str(v) if isinstance(v, pd.Timestamp) else v)
                     for k, v in t.items()},
-        "root_cause": "Coolant pump/flow failure: coolant flow collapsed from nominal "
-                      "~6-11 L/min to 1.8 L/min, temperature rose past the safe "
-                      "threshold within ~10 minutes, BMS applied a thermal derate, the "
-                      "inverter tripped on overtemperature and the site executed a "
-                      "protective shutdown. Recovery followed a coolant pump restart.",
+        "root_cause": _root_cause(top, events),
     }
 
 
-def draft_service_ticket() -> dict:
-    """Service ticket (JSON + rendered text) for the most severe issue."""
+def draft_service_ticket(rank: int = 1) -> dict:
+    """Service ticket (JSON + rendered text) for the episode at the given
+    severity rank (1 = most severe). Every field -- title, root cause,
+    priority, evidence chart, affected modules -- is derived from the
+    selected episode's own data; nothing is issue-specific.
+    """
     events = _events()
-    top = diagnostics.detect_episodes(events)[0]
-    incident = diagnostics.reconstruct_incident(events, top)
+    episodes = diagnostics.detect_episodes(events)
+    try:
+        rank = int(rank)
+    except (TypeError, ValueError):
+        return {"error": f"rank must be an integer, got {rank!r}"}
+    if not 1 <= rank <= len(episodes):
+        return {"error": f"rank {rank} out of range; {len(episodes)} episodes "
+                         "detected (1 = most severe)"}
+    ep = episodes[rank - 1]
+    incident = diagnostics.reconstruct_incident(events, ep)
     t = incident["timings"]
-    label, rationale = diagnostics.classify_episode(top, events)
+    label, _ = diagnostics.classify_episode(ep, events)
+    tags = _tags_in_causal_order(ep)
 
     evidence = [f"{row.timestamp:%H:%M:%S} [{row.subsystem}/{row.severity}] {row.message}"
                 for row in incident["timeline"].itertuples()
                 if row.severity in ("WARNING", "ERROR", "CRITICAL")]
-    # A real ticket ships with its evidence: attach the incident chart.
-    chart = plot_signals(["coolant_flow", "temperature"], around_incident=True,
-                         highlight_alerts=True)
+    modules = sorted(ep["alerts"]["module"].dropna().astype(int).unique().tolist())
+
+    # Evidence chart: the dense signals relevant to this episode's issue
+    # types, over the episode's own window (plus surrounding baseline).
+    metrics = []
+    for tag in tags:
+        for metric in TAG_METRICS.get(tag, []):
+            if metric not in metrics:
+                metrics.append(metric)
+    window_start = ep["start"] - pd.Timedelta(minutes=45)
+    window_end = (t["recovered"] if pd.notna(t["recovered"]) else ep["end"]) \
+        + pd.Timedelta(minutes=20)
+    chart = plot_signals(metrics[:len(METRIC_COLORS)], start=str(window_start),
+                         end=str(window_end), highlight_alerts=True)
+
+    title = " -> ".join(TAG_PHRASES.get(tag, tag) for tag in tags)
+    title = title[0].upper() + title[1:]  # capitalize() would lowercase "SOC"
+    if modules:
+        title += f" (Module {', '.join(map(str, modules))})"
+    priority = "P1" if ep["n_critical"] else ("P2" if ep["n_error"] else "P3")
+    when = lambda key, fallback: str(t[key]) if pd.notna(t[key]) else fallback
+
     ticket = {
-        "ticket_id": f"MP-{top['start']:%Y%m%d}-001",
-        "title": "Coolant-flow collapse led to overtemperature protective shutdown",
-        "priority": "P1" if top["n_critical"] else "P2",
+        "ticket_id": f"MP-{ep['start']:%Y%m%d}-{rank:03d}",
+        "severity_rank": rank,
+        "title": title,
+        "priority": priority,
         "status": "OPEN",
         "site": "Megapack site (MP_Logs)",
-        "affected_subsystems": top["subsystems"],
-        "issue_types": top["tags"],
+        "affected_subsystems": ep["subsystems"],
+        "affected_modules": modules,
+        "issue_types": ep["tags"],
         "classification": label,
-        "root_cause": "Coolant pump/flow failure in the thermal loop (internal fault). "
-                      + rationale,
-        "first_warning": str(t["first_warning"]),
-        "trip": str(t["trip"]),
-        "recovered": str(t["recovered"]),
+        "root_cause": _root_cause(ep, events),
+        "first_warning": when("first_warning", "n/a"),
+        "trip": when("trip", "n/a (no protective trip)"),
+        "recovered": when("recovered", "unresolved (no recovery marker)"),
         "warning_to_trip_min": t["warning_to_trip_min"],
         "downtime_min": t["downtime_min"],
         "evidence": evidence,
         "attachment_chart": chart.get("chart_path"),
-        "recommended_actions": [ACTIONS[tag] for tag in top["tags"] if tag in ACTIONS],
+        "recommended_actions": [ACTIONS[tag] for tag in ep["tags"] if tag in ACTIONS],
     }
+
+    timeline = f"Timeline: first warning {ticket['first_warning']}"
+    if pd.notna(t["trip"]):
+        timeline += f" -> trip {ticket['trip']} ({t['warning_to_trip_min']:.1f} min)"
+    timeline += f" -> recovered {ticket['recovered']}"
+    if t["downtime_min"] is not None:
+        timeline += f" (downtime {t['downtime_min']:.0f} min)"
     lines = [f"SERVICE TICKET {ticket['ticket_id']}  [{ticket['priority']}]",
              f"Title: {ticket['title']}",
              f"Affected subsystems: {', '.join(ticket['affected_subsystems'])}",
              f"Issue types: {', '.join(ticket['issue_types'])}",
              f"Root cause: {ticket['root_cause']}",
-             f"Timeline: first warning {ticket['first_warning']} -> trip {ticket['trip']}"
-             f" ({t['warning_to_trip_min']:.1f} min) -> recovered {ticket['recovered']}"
-             f" (downtime {t['downtime_min']:.0f} min)",
+             timeline,
              "Recommended actions:"]
     lines += [f"  - {a}" for a in ticket["recommended_actions"]]
     if ticket["attachment_chart"]:
-        lines.append(f"Attachment: {ticket['attachment_chart']} (coolant flow and "
-                     "temperature around the incident, alerts highlighted)")
+        lines.append(f"Attachment: {ticket['attachment_chart']} "
+                     f"({', '.join(chart.get('metrics', []))} around the episode, "
+                     "alerts highlighted)")
     ticket["rendered_text"] = "\n".join(lines)
     return ticket

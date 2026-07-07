@@ -106,13 +106,21 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "draft_service_ticket",
-        "description": "Draft a service ticket (JSON + rendered text) for the most "
-                       "severe issue in the logs: root cause, affected subsystems, "
-                       "evidence, recommended actions, and an attached evidence chart "
-                       "(attachment_chart). Call this when the user asks for a ticket; "
-                       "mention the attachment path in your answer.",
-        "input_schema": {"type": "object", "properties": {},
-                         "additionalProperties": False},
+        "description": "Draft a service ticket (JSON + rendered text) for one of the "
+                       "ranked fleet-health episodes: root cause, affected subsystems "
+                       "and modules, evidence, recommended actions, and an attached "
+                       "evidence chart (attachment_chart) of that episode's relevant "
+                       "signals. Call this when the user asks for a ticket; mention "
+                       "the attachment path in your answer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rank": {"type": "integer",
+                         "description": "which episode to ticket by severity rank: "
+                                        "1 = most severe (default), 2 = second, ..."},
+            },
+            "additionalProperties": False,
+        },
     },
 ]
 
@@ -209,7 +217,11 @@ def run_fallback(question: str) -> dict:
 
     today = str(tools._bounds()[1].date())
     if "ticket" in q:
-        ticket = call("draft_service_ticket")
+        rank = 1
+        for words, r in ((("second", "2nd", "#2"), 2), (("third", "3rd", "#3"), 3)):
+            if any(w in q for w in words):
+                rank = r
+        ticket = call("draft_service_ticket", rank=rank)
         answer = ticket.get("rendered_text", ticket.get("error", ""))
     elif any(w in q for w in ("plot", "chart", "graph")):
         metrics = list(dict.fromkeys(m for kw, m in KEYWORD_METRICS if kw in q)) \

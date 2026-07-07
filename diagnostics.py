@@ -156,14 +156,16 @@ def reconstruct_incident(events: pd.DataFrame, ep: dict) -> dict:
     first_of = lambda sev: alerts.loc[alerts["severity"] == sev, "timestamp"].min()
     offline_rows = alerts[alerts["message"].str.contains("offline", case=False)]
     recovery = recovery_after(events, ep["end"])
-    online = recovery[recovery["message"] == "Megapack online"]
 
     timings = {
         "first_warning": first_of("WARNING"),
         "first_error": first_of("ERROR"),
         "trip": first_of("CRITICAL"),
         "site_offline": offline_rows["timestamp"].min() if not offline_rows.empty else pd.NaT,
-        "recovered": online["timestamp"].min() if not online.empty else pd.NaT,
+        # Recovered = the last recovery-marker transition after the episode
+        # ("Megapack online" for a shutdown, "Dispatch resumed" for a grid
+        # event); NaT when the episode has no recovery (needs intervention).
+        "recovered": recovery["timestamp"].max() if not recovery.empty else pd.NaT,
     }
     minutes = lambda a, b: (timings[b] - timings[a]).total_seconds() / 60 \
         if pd.notna(timings[a]) and pd.notna(timings[b]) else None
