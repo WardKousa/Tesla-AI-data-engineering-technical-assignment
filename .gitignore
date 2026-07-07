@@ -3,3 +3,5 @@ __pycache__/
 outputs/bess.db
 outputs/logs.db
 outputs/log_events.csv
+outputs/agent_plot_*.png
+!outputs/agent_plot_coolant_flow_temperature.png
