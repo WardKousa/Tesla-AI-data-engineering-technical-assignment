@@ -7,7 +7,7 @@ assignment plus two extras: a generalization test and an out-of-scope refusal.
 Prose answers are the model's; every number in them traces to the JSON tool
 results printed below each answer. The same harness also runs with no API key
 at all (a deterministic keyword router answers the scripted prompts and refuses
-everything else); the scripted three-prompt demo is in [transcript.md](transcript.md).
+everything else).
 
 ## Prompt 1
 
