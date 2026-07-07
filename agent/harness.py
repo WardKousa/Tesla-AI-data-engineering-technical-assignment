@@ -94,10 +94,14 @@ TOOL_SCHEMAS = [
     {
         "name": "summarize_incident",
         "description": "Structured JSON summary of the most severe alert episode: "
-                       "timeline, root cause, first-warning/trip/recovery timings, and "
-                       "a ranked list of all episodes. Optionally restrict to episodes "
-                       "starting on a given date. Call this for incident, anomaly and "
-                       "root-cause questions.",
+                       "timeline, root cause, timings, a ranked list of all episodes, "
+                       "and an evidence_chart PNG of the episode's relevant signals "
+                       "(include its path in your answer). Optionally restrict to "
+                       "episodes starting on a given date. Call this for incident, "
+                       "anomaly and root-cause questions. Time spans are distinct: "
+                       "alert_span_min = first to last alert; downtime_min = site "
+                       "offline to back online; first_warning_to_recovery_min = the "
+                       "whole episode - do not conflate them.",
         "input_schema": {
             "type": "object",
             "properties": {"date": {"type": "string", "description": "e.g. 2026-06-18"}},
@@ -246,6 +250,8 @@ def run_fallback(question: str) -> dict:
                       f"trip {t['trip']} ({t['warning_to_trip_min']:.1f} min later), "
                       f"recovered {t['recovered']} "
                       f"(downtime {t['downtime_min']:.0f} min).")
+            if summary.get("evidence_chart"):
+                answer += f"\nEvidence chart: {summary['evidence_chart']}"
     elif any(w in q for w in ("how many", "count", "per subsystem", "per severity")):
         stats = call("event_stats", group_by=["subsystem", "severity"])
         lines = [f"  {c['subsystem']:<9} {c['severity']:<9} {c['n_events']}"

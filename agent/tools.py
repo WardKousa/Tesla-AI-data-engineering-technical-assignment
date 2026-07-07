@@ -258,6 +258,22 @@ def _tags_in_causal_order(ep: dict) -> list[str]:
     return ordered
 
 
+def _episode_evidence_chart(ep: dict, timings: dict) -> dict:
+    """Evidence chart for one episode: its tag-relevant signals over its own
+    window (plus surrounding baseline), alerts highlighted. Shared by the
+    ticket and summary tools so both attach identical evidence."""
+    metrics: list[str] = []
+    for tag in _tags_in_causal_order(ep):
+        for metric in TAG_METRICS.get(tag, []):
+            if metric not in metrics:
+                metrics.append(metric)
+    window_start = ep["start"] - pd.Timedelta(minutes=45)
+    window_end = (timings["recovered"] if pd.notna(timings["recovered"])
+                  else ep["end"]) + pd.Timedelta(minutes=20)
+    return plot_signals(metrics[:len(METRIC_COLORS)], start=str(window_start),
+                        end=str(window_end), highlight_alerts=True)
+
+
 def _root_cause(ep: dict, events: pd.DataFrame) -> str:
     """Evidence-derived root-cause statement for any episode: the first fault
     signal (which is the causal origin in an escalation) plus classification."""
@@ -270,7 +286,8 @@ def _root_cause(ep: dict, events: pd.DataFrame) -> str:
 def _episode_json(ep: dict, events: pd.DataFrame) -> dict:
     label, rationale = diagnostics.classify_episode(ep, events)
     return {"rank": ep["rank"], "start": str(ep["start"]), "end": str(ep["end"]),
-            "duration_min": round((ep["end"] - ep["start"]).total_seconds() / 60, 1),
+            # first alert -> last alert; NOT downtime (see summarize timings)
+            "alert_span_min": round((ep["end"] - ep["start"]).total_seconds() / 60, 1),
             "alerts": {"warning": ep["n_warning"], "error": ep["n_error"],
                        "critical": ep["n_critical"]},
             "severity_score": ep["score"], "subsystems": ep["subsystems"],
@@ -294,14 +311,20 @@ def summarize_incident(date: str | None = None) -> dict:
     timeline = [{"time": str(row.timestamp), "subsystem": row.subsystem,
                  "severity": row.severity, "message": row.message}
                 for row in incident["timeline"].itertuples()]
+    # Three distinct spans, named so they cannot be conflated: alert_span_min
+    # (in each episode dict), downtime_min, first_warning_to_recovery_min.
+    timings = {("first_warning_to_recovery_min" if k == "total_min" else k):
+               (str(v) if isinstance(v, pd.Timestamp) else v)
+               for k, v in t.items()}
+    chart = _episode_evidence_chart(top, t)  # a summary ships with its evidence
     return {
         "episode": _episode_json(top, events),
         "all_episodes": [_episode_json(ep, events)
                          for ep in diagnostics.detect_episodes(events)],
         "timeline": timeline,
-        "timings": {k: (str(v) if isinstance(v, pd.Timestamp) else v)
-                    for k, v in t.items()},
+        "timings": timings,
         "root_cause": _root_cause(top, events),
+        "evidence_chart": chart.get("chart_path"),
     }
 
 
@@ -331,18 +354,7 @@ def draft_service_ticket(rank: int = 1) -> dict:
                 if row.severity in ("WARNING", "ERROR", "CRITICAL")]
     modules = sorted(ep["alerts"]["module"].dropna().astype(int).unique().tolist())
 
-    # Evidence chart: the dense signals relevant to this episode's issue
-    # types, over the episode's own window (plus surrounding baseline).
-    metrics = []
-    for tag in tags:
-        for metric in TAG_METRICS.get(tag, []):
-            if metric not in metrics:
-                metrics.append(metric)
-    window_start = ep["start"] - pd.Timedelta(minutes=45)
-    window_end = (t["recovered"] if pd.notna(t["recovered"]) else ep["end"]) \
-        + pd.Timedelta(minutes=20)
-    chart = plot_signals(metrics[:len(METRIC_COLORS)], start=str(window_start),
-                         end=str(window_end), highlight_alerts=True)
+    chart = _episode_evidence_chart(ep, t)
 
     title = " -> ".join(TAG_PHRASES.get(tag, tag) for tag in tags)
     title = title[0].upper() + title[1:]  # capitalize() would lowercase "SOC"

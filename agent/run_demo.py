@@ -34,7 +34,9 @@ def _render(result: dict) -> list[str]:
                   json.dumps(truncate_for_display(call["result"]),
                              indent=2, default=str, ensure_ascii=False),
                   "```", ""]
-        chart = call["result"].get("chart_path") or call["result"].get("attachment_chart")
+        chart = (call["result"].get("chart_path")
+                 or call["result"].get("attachment_chart")
+                 or call["result"].get("evidence_chart"))
         if chart:
             lines += [f"![chart](../{Path(chart).as_posix()})", ""]
     lines += ["**Answer:**", "", result["answer"], ""]
