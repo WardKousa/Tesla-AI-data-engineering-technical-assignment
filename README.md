@@ -95,6 +95,20 @@ would carry the risk of that forecast being wrong.
 
 ## Part 2, Fleet log intelligence
 
+### How to run
+
+```bash
+python etl.py                     # parse MP_Logs.txt -> outputs/logs.db + CSV
+python diagnostics.py             # episodes, incident root cause, SQL insights, chart
+python -m agent.run_demo          # the assignment's three prompts -> agent/transcript.md
+python -m agent.harness "Summarize the thermal anomalies today"   # one-off question
+```
+
+Everything works offline with no API key (deterministic keyword router). Setting
+`ANTHROPIC_API_KEY` upgrades the agent to real LLM tool-calling with
+`claude-haiku-4-5`; a recorded LLM-mode session is in
+[agent/terminal_session.md](agent/terminal_session.md).
+
 ### Approach
 
 I split the work into three files because they are three different jobs: `etl.py`
