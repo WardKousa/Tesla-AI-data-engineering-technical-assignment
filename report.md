@@ -47,4 +47,5 @@ distinguishing external disturbances correctly.
 
 Full timelines, per-subsystem statistics and SQL detail: `outputs/part2_console_output.txt`.
 A natural-language interface over these logs (summaries, plots, service tickets) is in
-`agent/` — see `agent/transcript.md` for it answering the assignment's three prompts.
+`agent/` — see `agent/terminal_session.md` for a recorded session of it answering the
+assignment's prompts plus a generalization test and an out-of-scope refusal.

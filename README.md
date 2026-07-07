@@ -16,13 +16,13 @@ python analysis.py
 python etl.py
 python diagnostics.py
 python -m agent.run_demo
-python -m agent.harness "how many errors per subsystem"   # ask your own question
+python -m agent.harness "how many errors per subsystem"   # or any free-form question
 ```
 
 Requires Python 3.10+. Everything runs offline with no API key; setting
 `ANTHROPIC_API_KEY` upgrades the Part 2 agent from the keyword router to real
 LLM tool-calling (see Part 2 below). Outputs land in `outputs/`: charts used in
-the report, `bess.db` / `logs.db` (SQLite databases you can run `queries.sql`
+the report, `bess.db` / `logs.db` (SQLite databases that `queries.sql` runs
 against), and saved console output for both parts.
 
 ## Approach
@@ -55,11 +55,11 @@ the 15-minute grid) and fails fast with a clear message if something's off.
 ## A note on the energy totals (is the data real?)
 
 The battery discharges about 139 MWh more than it charges, which at first looks
-impossible: you can't get more energy out than you put in. The explanation is SOC. The
-site starts around 79% full and ends around 10% full, so it releases roughly 137 MWh of
-previously stored energy, and that almost exactly closes the 139 MWh gap.
+impossible: a battery can't put out more energy than it takes in. The explanation is SOC.
+The site starts around 79% full and ends around 10% full, so it releases roughly 137 MWh
+of previously stored energy, and that almost exactly closes the 139 MWh gap.
 
-What's left after that correction is the real tell. Once you account for the stored
+What's left after that correction is the real tell. Once I account for the stored
 energy, the implied round-trip loss is essentially zero. A real battery **always** loses
 some energy on every charge and discharge (round-trip efficiency is typically 85 to
 92%), so a near-zero or negative loss is physically impossible. That strongly suggests
@@ -73,16 +73,16 @@ the dataset is synthetic. It doesn't change the revenue analysis, but it's worth
 - The outage is whole calendar days, scheduled fully inside Q1 2024.
 
 One thing worth being upfront about: the window is chosen with full hindsight over the
-whole quarter's prices. In reality you'd have to commit to a maintenance date in
-advance, before those prices are known, so a real deployment would need a price
-forecast and would carry the risk of that forecast being wrong.
+whole quarter's prices. In reality the maintenance date has to be committed in advance,
+before those prices are known, so a real deployment would need a price forecast and
+would carry the risk of that forecast being wrong.
 
 ## What I'd do with more time
 
 - **Forecast the prices instead of using hindsight.** Right now I pick the cheapest
-  window because I can already see that March was cheap. In real life you have to choose
-  the maintenance date *before* you know future prices, so you'd need a price forecast
-  and accept that it might be wrong.
+  window because I can already see that March was cheap. In real life the maintenance
+  date is chosen *before* future prices are known, so I'd need a price forecast and
+  accept that it might be wrong.
 - **Add the missing Frequency Regulation income.** FR shows up as slightly money-losing
   (about -£80/day) only because this dataset has energy prices but not the availability
   payments that FR actually earns most of its money from. With those contract numbers,
@@ -95,82 +95,59 @@ forecast and would carry the risk of that forecast being wrong.
 
 ## Part 2, Fleet log intelligence
 
-Parsing lives in `etl.py`, diagnostics in `diagnostics.py`, and the agent in
-`agent/` — deliberately separate files because they are different jobs: turning
-messy text into a trustworthy table (deterministic ETL), interpreting that table
-(analysis), and exposing it to natural language (automation).
-
 ### Approach
 
-**ETL.** The log looks clean but isn't: of 5,746 lines, five are malformed. The
-policy is *never silently drop* — every input line is accounted for. Lines that
-can be salvaged safely are kept with an explicit `salvage_note` (missing
-severity → `UNKNOWN`, empty subsystem → `UNKNOWN`, a truncated timestamp →
-seconds assumed `:00`); the one unparseable line (`CORRUPTED ENTRY ### sensor
-dropout`) is quarantined to a `rejected_lines` table with a reason, and one
-blank line is counted. Numeric values are extracted with one regex per message
-shape rather than "grab the first number", because in messages like
-`Overtemperature fault Module 7: 78.1°C` the module number comes first — a
-naive parser would store 7 instead of 78.1. Each row gets `metric`, `value`,
-`unit`, `module`, and a normalized `message_template` (numbers → N) that the
-SQL uses to group "error types".
+I split the work into three files because they are three different jobs: `etl.py`
+turns messy text into a trustworthy table, `diagnostics.py` interprets that table,
+and `agent/` exposes it to natural language.
 
-**Diagnostics.** Alerts (45 of 5,744 events) are clustered into episodes: a
-quiet gap of over an hour starts a new episode (alerts inside an ongoing issue
-recur every few minutes here, so an hour of silence separates unrelated
-stories). Each episode is scored (CRITICAL=10, ERROR=5, WARNING=1), tagged with
-the fleet-health issue types it contains (thermal event, coolant-flow loss,
-cell imbalance, voltage drop, grid-sync instability, SOC mismatch), and
-classified as internal vs externally-driven from evidence: grid-only signals
-plus self-recovery without a trip means external; a cross-subsystem escalation
-ending in a trip, or a progressive drift ending in an inspection flag, means
-internal. The three episodes this finds, and the reconstructed timeline of the
-18 June thermal incident, are in [report.md](report.md).
+The log looks clean but isn't: of 5,746 lines, five are malformed, and my policy is
+to never silently drop a line. Whatever can be salvaged safely is kept with a note
+(missing severity, empty subsystem, truncated timestamp); the one unparseable line
+is quarantined to a `rejected_lines` table with a reason, and every input line is
+accounted for. Numeric values are extracted with one regex per message shape rather
+than "grab the first number", because in messages like `Overtemperature fault
+Module 7: 78.1°C` the module number comes first and a naive parser would store 7
+instead of 78.1.
 
-**Agent.** Five deterministic tools over the structured database (query events,
-stats, plot signals, incident summary as JSON, service-ticket drafting) with
-two interchangeable routers on top. With `ANTHROPIC_API_KEY` set, a small LLM
-(`claude-haiku-4-5`) does real tool-calling: it picks the tools, reads their
-JSON results, and writes the answer. Without a key, a keyword router maps the
-assignment's prompts to the same tools and fills templates. The design rule is
-*LLM where language is the problem, plain code where correctness is the
-problem*: every number, timestamp and chart comes from a tool, never from the
-model, so answers are auditable against the database. Questions neither router
-can ground in tool results get an explicit "I can't answer that" — tools return
-structured errors (unknown metric, date outside the log) rather than defaults,
-so the LLM has nothing to hallucinate from, and the keyword router refuses
-anything unscripted. Known limitation of the fallback: it only handles the
-scripted intents, while LLM mode can compose tools for novel questions.
-`agent/transcript.md` shows the three assignment prompts answered end to end
-(text + JSON + chart).
+For diagnostics I cluster the 45 alerts into episodes (an hour of quiet starts a
+new one), score each episode by severity, tag it with the issue types it contains
+(thermal event, coolant-flow loss, cell imbalance, voltage drop, grid-sync
+instability, SOC mismatch), and classify it as internal or externally-driven from
+the evidence: grid-only signals that recover on their own mean external, a
+cross-subsystem escalation ending in a trip means internal. The three episodes this
+finds, and the timeline of the 18 June thermal incident, are in
+[report.md](report.md).
+
+The agent is five deterministic tools over the structured database (query, stats,
+plots, incident summary as JSON, service tickets) with two interchangeable routers
+on top: with `ANTHROPIC_API_KEY` set, a small LLM (`claude-haiku-4-5`) picks the
+tools and writes the answer; without a key, a keyword router maps the standard
+prompts to the same tools. The design rule is *LLM where language is the problem,
+plain code where correctness is the problem*: every number, timestamp and chart
+comes from a tool, never from the model, so answers are auditable against the
+database — and questions the tools can't ground get an explicit "I can't answer
+that" instead of a guess. A recorded session of the agent answering the
+assignment's prompts (plus a generalization test and a refusal) is in
+[agent/terminal_session.md](agent/terminal_session.md), and the optional bonus
+designs are in [bonus.md](bonus.md).
 
 ### Assumptions
 
-- Severity weights (10/5/1) and the 60-minute episode gap are judgment calls,
-  stated in code; results are not sensitive to reasonable alternatives.
-- "Today" is computed as the most recent calendar date in the file
-  (2026-06-18), not the wall-clock date, per the assignment's definition.
-- Ground-truth expectations about this specific file (45 alerts, 5 malformed
-  lines, 3 episodes) are printed ✓/⚠ checks, not hard asserts — the pipeline
-  stays usable on a different log file. Hard asserts are reserved for internal
-  consistency (line accounting, pandas-vs-SQL cross-checks).
-- The root-cause narrative names the coolant pump as the likely trigger (flow
-  collapsed while pump speed read 71%, and a pump restart fixed it); the logs
-  cannot distinguish pump wear from a blockage or a leak — that needs the site
-  visit the ticket recommends.
+- I read the PDF's "output should include text, a JSON summary, and at least one
+  chart" as applying to every answer, so summaries and tickets attach an evidence
+  chart too.
+- The severity weights (10/5/1) and the one-hour gap that separates episodes are
+  my judgment calls.
+- "Today" means the last day in the log (18 June 2026), not the real date.
+- The logs point to the coolant pump as the trigger, but they can't prove pump
+  wear versus a blockage or leak — that needs the site visit the ticket recommends.
 
 ### What I'd do with more time
 
-- **The bonus sections (B1 predictive RUL design, B2 auto-research agent
-  design)** — deliberately deferred to keep the core five steps polished; the
-  Module 4 imbalance data here would make a natural worked example for B1.
-- **Streaming ETL.** The parser reads the whole file; a real fleet emits logs
-  continuously, so the next step is incremental ingestion with the same
-  salvage/quarantine policy and idempotent upserts into the database.
-- **Learned thresholds.** Episode detection uses the log's own alert severities;
-  detecting *pre-alert* anomalies (the coolant flow was already sagging at
-  13:19, three minutes before the first WARNING) needs baselines per metric —
-  even simple rolling z-scores would have bought extra minutes of warning.
-- **Harden the agent.** Conversation memory (follow-up questions), a small eval
-  set of question/expected-tool pairs to regression-test routing, and running
-  the LLM answers against the JSON to auto-verify every quoted number.
+- **Harden the agent.** Conversation memory for follow-up questions, a small eval
+  set of question-to-expected-tool pairs to regression-test the routing, and
+  auto-checking every number in an LLM answer against the tool JSON.
+- **More tools, sharper logic.** Per-module queries, day-vs-day comparisons,
+  richer statistics, and more specific tool descriptions so routing gets even
+  more precise on unusual questions.

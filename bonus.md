@@ -79,8 +79,8 @@ cell degradation"), let it research the internet and public battery data on its 
 and get back one answer where every claim is cited and checkable.
 
 The web can't be handled the way I handled my logs. In Part 2 I could keep everything
-deterministic because I knew every message format in advance. You can't write rules for
-the open internet, so the exploring has to be model-driven which queries to run,
+deterministic because I knew every message format in advance. I can't write rules for
+the open internet, so the exploring has to be model-driven: which queries to run,
 which pages are worth reading, when there's enough. I accept that non-determinism, and
 instead make the checks deterministic: the model is free to explore, but every fact it
 keeps has to pass through code.
